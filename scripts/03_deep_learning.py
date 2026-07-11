@@ -126,8 +126,14 @@ model = HousePriceModel().to(device)
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-for epoch in range(100):
+best_val_mae = float('inf')
+patience = 20
+patience_counter = 0
+best_model_state = None
+
+for epoch in range(150):
     epoch_loss = 0.0
+    model.train()
     for X_batch, y_batch in train_loader:
         X_batch = X_batch.to(device)
         y_batch = y_batch.to(device)
@@ -145,6 +151,26 @@ for epoch in range(100):
         print(f"Epoch {epoch + 1}, Loss (log space): {avg_loss:.4f}")
 
 
+    model.eval()
+    with torch.no_grad():
+        X_val_gpu = X_val_t.to(device)
+        y_val_pred_log = model(X_val_gpu)
+        y_pred = np.expm1(y_val_pred_log.cpu().numpy().flatten())
+        y_true = y_val.values.flatten()
+        val_mae = np.mean(np.abs(y_true - y_pred))
+    
+    if val_mae < best_val_mae:
+        best_val_mae = val_mae
+        patience_counter = 0
+        best_model_state = model.state_dict()
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            print(f"Early stopping triggered at epoch {epoch + 1}")
+            break
+
+model.load_state_dict(best_model_state)
+
 model.eval()
 with torch.no_grad():
     X_val_gpu = X_val_t.to(device)
@@ -157,3 +183,6 @@ rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
 
 print(f"Validation MAE:  ${mae:,.0f}")
 print(f"Validation RMSE: ${rmse:,.0f}")
+
+model.load_state_dict(best_model_state)
+torch.save(best_model_state, PROJECT_ROOT / 'outputs' / 'best_model.pt')
