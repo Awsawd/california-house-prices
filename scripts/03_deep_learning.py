@@ -50,21 +50,16 @@ top_cities = X_train['City'].value_counts().nlargest(20).index
 X_train['City'] = X_train['City'].where(X_train['City'].isin(top_cities), 'Other')
 X_val['City']   = X_val['City'].where(X_val['City'].isin(top_cities), 'Other')
 
-#中位值填充
+#中位值填充（统计量仅用训练集）
 median = X_train[NUMERIC_FEATURES].median()
-X_train[NUMERIC_FEATURES] = X_train[NUMERIC_FEATURES].fillna(X_train[NUMERIC_FEATURES].median())
-X_val[NUMERIC_FEATURES] = X_val[NUMERIC_FEATURES].fillna(X_val[NUMERIC_FEATURES].median())
+X_train[NUMERIC_FEATURES] = X_train[NUMERIC_FEATURES].fillna(median)
+X_val[NUMERIC_FEATURES] = X_val[NUMERIC_FEATURES].fillna(median)
 
-#清除异常值
-lower_limit = X_train['Total interior livable area'].quantile(0.01)
-upper_limit = X_train['Total interior livable area'].quantile(0.99)
-X_train['Total interior livable area'] = X_train['Total interior livable area'].clip(lower=lower_limit, upper=upper_limit)
-X_val['Total interior livable area'] = X_val['Total interior livable area'].clip(lower=lower_limit, upper=upper_limit)
-
-lower_limit = X_train['Lot'].quantile(0.01)
-upper_limit = X_train['Lot'].quantile(0.99)
-X_train['Lot'] = X_train['Lot'].clip(lower=lower_limit, upper=upper_limit)
-X_val['Lot'] = X_val['Lot'].clip(lower=lower_limit, upper=upper_limit)
+# 清除异常值：所有数值列统一用训练集 1%/99% 分位数 clip
+clip_lower = X_train[NUMERIC_FEATURES].quantile(0.01)
+clip_upper = X_train[NUMERIC_FEATURES].quantile(0.99)
+X_train[NUMERIC_FEATURES] = X_train[NUMERIC_FEATURES].clip(lower=clip_lower, upper=clip_upper, axis=1)
+X_val[NUMERIC_FEATURES] = X_val[NUMERIC_FEATURES].clip(lower=clip_lower, upper=clip_upper, axis=1)
 
 
 # 目标 log1p 变换：缓解房价右偏，训练在 log 空间进行，评估时再 expm1 转回美元
@@ -184,5 +179,34 @@ rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
 print(f"Validation MAE:  ${mae:,.0f}")
 print(f"Validation RMSE: ${rmse:,.0f}")
 
-model.load_state_dict(best_model_state)
+(PROJECT_ROOT / 'outputs').mkdir(exist_ok=True)
 torch.save(best_model_state, PROJECT_ROOT / 'outputs' / 'best_model.pt')
+
+
+#预测
+test_data = pd.read_csv(PROJECT_ROOT / 'data' / 'test.csv')
+test_ids = test_data['Id']
+X_test = test_data[NUMERIC_FEATURES + CAT_FEATURES]
+X_test['Bedrooms'] = pd.to_numeric(X_test['Bedrooms'], errors='coerce')
+X_test['City'] = X_test['City'].where(X_test['City'].isin(top_cities), 'Other')
+X_test[NUMERIC_FEATURES] = X_test[NUMERIC_FEATURES].fillna(median)
+X_test[NUMERIC_FEATURES] = X_test[NUMERIC_FEATURES].clip(lower=clip_lower, upper=clip_upper, axis=1)
+X_test_num = scaler.transform(X_test[NUMERIC_FEATURES])
+X_test_cat = pd.get_dummies(X_test[['Type','City']], prefix=['Type','City']).astype(np.float32)
+X_test_cat = X_test_cat.reindex(columns=X_train_cat.columns, fill_value=0)
+X_test_scaled = np.hstack([X_test_num, X_test_cat.values]).astype(np.float32)
+X_test_t = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
+
+
+model.eval()
+with torch.no_grad():
+    y_test_pred_log = model(X_test_t)
+    y_test_pred = np.expm1(y_test_pred_log.cpu().numpy().flatten())
+
+submission = pd.DataFrame({
+    'Id': test_ids,
+    'Sold Price': y_test_pred
+})
+(PROJECT_ROOT / 'outputs').mkdir(exist_ok=True)
+submission.to_csv(PROJECT_ROOT / 'outputs' / 'submission.csv', index=False)
+print(f"Saved {len(submission)} predictions to outputs/submission.csv")
