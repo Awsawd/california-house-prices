@@ -63,6 +63,8 @@ if __name__ == "__main__":
     # True: 训练并保存权重；False: 加载已有权重，只做测试集推理
     DO_TRAIN = True
     NUM_EPOCHS = 100
+    # 验证准确率连续 PATIENCE 个 epoch 没有提升就停止
+    PATIENCE = 10
     CKPT_PATH = PROJECT_PATH / "outputs" / "alexnet.pth"
 
     data_root = PROJECT_PATH / "data" / "classify-leaves"
@@ -120,6 +122,9 @@ if __name__ == "__main__":
             model.parameters(), lr=0.01, momentum=0.9
         )
 
+        best_val_acc = -1.0
+        epochs_no_improve = 0
+
         for epoch in range(NUM_EPOCHS):
             model.train()
             train_loss = 0.0
@@ -131,30 +136,53 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
-            if epoch % 10 == 0:
-                print(
-                    f"Epoch {epoch + 1}, train loss: {train_loss / len(train_loader)}"
+            avg_train_loss = train_loss / len(train_loader)
+
+            # 每个 epoch 验证一次
+            model.eval()
+            correct, total = 0, 0
+            with torch.no_grad():
+                for imgs, labels in val_loader:
+                    imgs, labels = imgs.to(device), labels.to(device)
+                    pred = model(imgs).argmax(dim=1)
+                    correct += (pred == labels).sum().item()
+                    total += labels.size(0)
+            val_acc = correct / total
+            print(
+                f"Epoch {epoch + 1}, train loss: {avg_train_loss:.4f}, "
+                f"val acc: {val_acc:.4f}"
+            )
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                epochs_no_improve = 0
+                torch.save(
+                    {
+                        "model": model.state_dict(),
+                        "label_to_idx": ds.label_to_idx,
+                        "num_classes": len(ds.label_to_idx),
+                        "best_val_acc": best_val_acc,
+                        "best_epoch": epoch + 1,
+                    },
+                    CKPT_PATH,
                 )
+                print(f"  ↑ new best, saved -> {CKPT_PATH}")
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= PATIENCE:
+                    print(
+                        f"early stop at epoch {epoch + 1} "
+                        f"(best val acc {best_val_acc:.4f})"
+                    )
+                    break
 
-        model.eval()
-        correct, total = 0, 0
-        with torch.no_grad():
-            for imgs, labels in val_loader:
-                imgs, labels = imgs.to(device), labels.to(device)
-                pred = model(imgs).argmax(dim=1)
-                correct += (pred == labels).sum().item()
-                total += labels.size(0)
-        print("val acc:", correct / total)
-
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "label_to_idx": ds.label_to_idx,
-                "num_classes": len(ds.label_to_idx),
-            },
-            CKPT_PATH,
+        # 测试前加载验证集上最好的权重（不是发散后的最后一轮）
+        ckpt = torch.load(CKPT_PATH, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        print(
+            f"loaded best weights (epoch {ckpt.get('best_epoch', '?')}, "
+            f"val acc {ckpt.get('best_val_acc', best_val_acc):.4f})"
         )
-        print(f"saved weights -> {CKPT_PATH}")
     else:
         if not CKPT_PATH.exists():
             raise FileNotFoundError(
